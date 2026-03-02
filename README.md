@@ -79,14 +79,15 @@ idempotency-demo/
     test_idempotency.py  # Tests für Replay/Conflict/Missing-Key
   requirements.txt
   README.md
-Projekt starten
+```
+
+## Projekt starten
 Voraussetzungen
 
-Python 3.10+ (empfohlen)
+- Python 3.10+ (empfohlen)
+- pip
 
-pip
-
-Setup
+## Setup
 python -m venv .venv
 # macOS/Linux:
 source .venv/bin/activate
@@ -94,31 +95,30 @@ source .venv/bin/activate
 # .\.venv\Scripts\Activate.ps1
 
 pip install -r requirements.txt
-Server starten
+
+## Server starten
 uvicorn app.main:app --reload
 
 Danach:
 
 API: http://127.0.0.1:8000
 
-Swagger UI: http://127.0.0.1:8000/docs
-
-Proof / Demo: gleicher Request 3x → gleiche order_id
+# Proof / Demo: gleicher Request 3x → gleiche order_id
 Erwartetes Ergebnis
 
-Request 1: Idempotency-Replayed: false
+- Request 1: Idempotency-Replayed: false
+- Request 2/3: Idempotency-Replayed: true
+- order_id bleibt identisch → keine Duplikate trotz Retry
 
-Request 2/3: Idempotency-Replayed: true
-
-order_id bleibt identisch → keine Duplikate trotz Retry
-
-Linux/macOS/WSL/Git Bash
+# Linux/macOS/WSL/Git Bash
 chmod +x scripts/demo.sh
 ./scripts/demo.sh
-Windows PowerShell (ohne .sh)
+
+# Windows PowerShell (ohne .sh)
 
 Voraussetzung: Server läuft bereits.
 
+```powershell
 $key = [guid]::NewGuid().ToString()
 $body = @{
   customer_id="cust_123"
@@ -139,7 +139,11 @@ $body = @{
   "Idempotency-Replayed: $($resp.Headers['Idempotency-Replayed'])"
   "OrderId: $((($resp.Content | ConvertFrom-Json).order_id))"
 }
-Edge Case (wichtig): gleicher Key + anderer Body ⇒ 409 Conflict
+```
+
+# Edge Case (wichtig): gleicher Key + anderer Body ⇒ 409 Conflict
+
+```powershell
 $key = [guid]::NewGuid().ToString()
 
 $body1 = @{ customer_id="cust_123"; currency="EUR"; amount_cents=100 } | ConvertTo-Json -Compress
@@ -154,9 +158,13 @@ try {
 } catch {
   "Expected: HTTP $($_.Exception.Response.StatusCode.value__) (Conflict)"
 }
-Tests
+```
+# Tests
+```powershell
 pytest -q
-Storage-Optionen
+```
+
+# Storage-Optionen
 Default: In-Memory
 
 Schnell & simpel für Demos.
@@ -171,36 +179,34 @@ Optional: Persistenter Store (SQLite)
 
 Für Persistenz über Neustarts:
 
-macOS/Linux
+# macOS/Linux
+```powershell
 export IDEMPOTENCY_STORE=sqlite
 export IDEMPOTENCY_DB=./idempotency.sqlite3
 uvicorn app.main:app --reload
-Windows PowerShell
+```
+
+# Windows PowerShell
+```powershell
 $env:IDEMPOTENCY_STORE="sqlite"
 $env:IDEMPOTENCY_DB=".\\idempotency.sqlite3"
 uvicorn app.main:app --reload
-Wie die Implementierung funktioniert (konkret)
+```
 
-Request kommt rein mit Idempotency-Key.
+# Wie die Implementierung funktioniert (konkret)
 
-Server berechnet einen stabilen Request-Hash (sortiertes JSON).
+1. Request kommt rein mit Idempotency-Key.
+2. Server berechnet einen stabilen Request-Hash (sortiertes JSON).
+3. Lookup im Store:
 
-Lookup im Store:
+    - Key nicht vorhanden → Order erzeugen, Response speichern
+    - Key vorhanden + gleicher Hash → gespeicherte Response zurückgeben (Replay)
+    - Key vorhanden + anderer Hash → 409 Conflict
 
-Key nicht vorhanden → Order erzeugen, Response speichern
-
-Key vorhanden + gleicher Hash → gespeicherte Response zurückgeben (Replay)
-
-Key vorhanden + anderer Hash → 409 Conflict
-
-Production Notes / Grenzen
+# Production Notes / Grenzen
 
 Das hier ist eine Demo. In echten Systemen sind zusätzlich wichtig:
-
-Shared Store (DB/Redis) bei mehreren Instanzen
-
-TTL/Expiry für Keys (z. B. 24h)
-
-Atomicity (z. B. SETNX in Redis) um Race Conditions bei parallelen Requests zu verhindern
-
-Side-Effects ebenfalls idempotent machen (Emails, Events, …)
+    - Shared Store (DB/Redis) bei mehreren Instanzen
+    - TTL/Expiry für Keys (z. B. 24h)
+    - Atomicity (z. B. SETNX in Redis) um Race Conditions bei parallelen Requests zu verhindern
+    - Side-Effects ebenfalls idempotent machen (Emails, Events, …)
