@@ -5,7 +5,7 @@ import os
 import sqlite3
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -21,7 +21,14 @@ class IdempotencyStore:
     def get(self, key: str) -> Optional[StoredResponse]:
         raise NotImplementedError
 
-    def put(self, key: str, request_hash: str, status_code: int, response_json: Dict[str, Any]) -> None:
+    def put_if_absent(
+        self,
+        key: str,
+        request_hash: str,
+        status_code: int,
+        response_json: Dict[str, Any],
+    ) -> Tuple[StoredResponse, bool]:
+        """Atomically store a response or return the response already stored."""
         raise NotImplementedError
 
 
@@ -34,17 +41,28 @@ class MemoryStore(IdempotencyStore):
         with self._lock:
             return self._data.get(key)
 
-    def put(self, key: str, request_hash: str, status_code: int, response_json: Dict[str, Any]) -> None:
+    def put_if_absent(
+        self,
+        key: str,
+        request_hash: str,
+        status_code: int,
+        response_json: Dict[str, Any],
+    ) -> Tuple[StoredResponse, bool]:
+        candidate = StoredResponse(
+            request_hash=request_hash,
+            status_code=status_code,
+            response_json=response_json,
+        )
         with self._lock:
-            self._data[key] = StoredResponse(
-                request_hash=request_hash,
-                status_code=status_code,
-                response_json=response_json,
-            )
+            existing = self._data.get(key)
+            if existing is not None:
+                return existing, False
+            self._data[key] = candidate
+            return candidate, True
 
 
 class SQLiteStore(IdempotencyStore):
-    """SQLite-backed store (single-process demo; not for multi-instance without proper locking)."""
+    """SQLite-backed store with atomic insert-if-absent semantics."""
 
     def __init__(self, db_path: str) -> None:
         self._lock = threading.Lock()
@@ -61,29 +79,51 @@ class SQLiteStore(IdempotencyStore):
         )
         self._conn.commit()
 
+    @staticmethod
+    def _from_row(row: tuple[Any, ...]) -> StoredResponse:
+        request_hash, status_code, response_json = row
+        return StoredResponse(
+            request_hash=request_hash,
+            status_code=int(status_code),
+            response_json=json.loads(response_json),
+        )
+
     def get(self, key: str) -> Optional[StoredResponse]:
         with self._lock:
-            cur = self._conn.execute(
+            row = self._conn.execute(
                 "SELECT request_hash, status_code, response_json FROM idempotency WHERE key = ?",
                 (key,),
-            )
-            row = cur.fetchone()
-            if not row:
-                return None
-            request_hash, status_code, response_json = row
-            return StoredResponse(
-                request_hash=request_hash,
-                status_code=int(status_code),
-                response_json=json.loads(response_json),
-            )
+            ).fetchone()
+            return self._from_row(row) if row else None
 
-    def put(self, key: str, request_hash: str, status_code: int, response_json: Dict[str, Any]) -> None:
+    def put_if_absent(
+        self,
+        key: str,
+        request_hash: str,
+        status_code: int,
+        response_json: Dict[str, Any],
+    ) -> Tuple[StoredResponse, bool]:
+        serialized_response = json.dumps(response_json, ensure_ascii=False)
         with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO idempotency(key, request_hash, status_code, response_json) VALUES (?, ?, ?, ?)",
-                (key, request_hash, int(status_code), json.dumps(response_json, ensure_ascii=False)),
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO idempotency(key, request_hash, status_code, response_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (key, request_hash, int(status_code), serialized_response),
             )
             self._conn.commit()
+            created = cursor.rowcount == 1
+            if created:
+                return StoredResponse(request_hash, int(status_code), response_json), True
+
+            row = self._conn.execute(
+                "SELECT request_hash, status_code, response_json FROM idempotency WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Idempotency response disappeared after conflicting insert")
+            return self._from_row(row), False
 
 
 def build_store() -> IdempotencyStore:
