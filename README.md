@@ -1,226 +1,170 @@
-# Idempotency Demo (FastAPI) 🔁
+# Idempotency Demo
 
-Dieses Repo ist eine kleine, reproduzierbare Demo für **Idempotency / Idempotenz** in APIs.
+[![CI](https://github.com/joeltchoffo/idempotency-demo/actions/workflows/ci.yml/badge.svg)](https://github.com/joeltchoffo/idempotency-demo/actions/workflows/ci.yml)
 
-**Ziel:** `POST /orders` wird über einen `Idempotency-Key` **idempotent**, sodass ein Request mehrfach gesendet werden kann (Retries/Timeouts), ohne dass **doppelte Orders** entstehen.
+Kompakte FastAPI-Demo für sichere `POST`-Retries mit einem `Idempotency-Key`. Mehrfach gesendete und parallel eintreffende Requests erzeugen innerhalb einer App-Instanz genau eine gespeicherte Order-Response.
 
----
+**Stack:** Python · FastAPI · Pydantic · SQLite · Pytest · Docker · GitHub Actions
 
-## Was bedeutet Idempotency?
+## Warum dieses Projekt?
 
-Eine Operation ist **idempotent**, wenn du sie mehrfach ausführen kannst und der **Systemzustand am Ende derselbe bleibt**, als hättest du sie nur einmal ausgeführt.
+Netzwerkfehler und Timeouts führen häufig dazu, dass Clients einen Request wiederholen. Ohne Idempotenz können dadurch doppelte Bestellungen oder Zahlungen entstehen. Diese Demo zeigt die zentralen Bausteine einer belastbaren Lösung:
 
-Intuition:  
-Wenn du dieselbe Aktion nochmal machst, passiert **nichts Zusätzliches**.
+- stabiler SHA-256-Hash des Request-Bodys
+- atomare Insert-if-absent-Semantik
+- Replay der ursprünglichen Response
+- `409 Conflict` bei gleicher ID mit verändertem Body
+- Tests für sequenzielle und parallele Retries
 
-### Alltagsbeispiel (Payment)
-Du klickst auf **„Bezahlen“**, das Netz hängt kurz, dein Browser zeigt “Timeout”.  
-Du klickst nochmal.
+## Ablauf
 
-- **Ohne Idempotency:** im Worst Case **2–3 Abbuchungen / Orders**
-- **Mit Idempotency:** der Server erkennt die Anfrage wieder → **kein Duplikat**, gleiche Antwort
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as FastAPI
+    participant S as Store
 
-Merksatz:
-
-> **Wenn dein System Retries hat, braucht es Idempotency — sonst werden Fehler zu Duplikaten.**
-
----
-
-## HTTP-Kontext (kurz)
-- `GET` ist idempotent (lesen)
-- `PUT` ist idempotent (ersetzen)
-- `DELETE` ist idempotent (löschen)
-- `POST` ist **meist nicht** idempotent (create erzeugt oft jedes Mal etwas Neues)
-
-Darum wird Idempotency bei `POST` häufig über einen **Idempotency-Key** umgesetzt.
-
----
-
-## Wie wird `POST` idempotent? (Idempotency-Key Pattern)
-
-1. Client schickt `POST /orders` plus Header  
-   `Idempotency-Key: <uuid>`
-2. Server speichert beim ersten Request:  
-   **key → response** (und einen **request_hash**)
-3. Kommt derselbe Key nochmal:
-   - gleicher Body → Response wird **replayed** (gleiche `order_id`)
-   - anderer Body → **409 Conflict** (Key wurde schon für eine andere Anfrage benutzt)
-
----
-
-## Was dieses Repo konkret demonstriert
-
-### ✅ API
-- `POST /orders`
-  - **required**: `Idempotency-Key`
-  - erstellt Order genau einmal pro Key
-  - liefert Response inkl. `order_id`
-
-### ✅ Transparenz über Response-Header
-- `Idempotency-Replayed: false` → neu erstellt
-- `Idempotency-Replayed: true` → wiederholte Response (kein Duplikat)
-- `Idempotency-Request-Hash: ...` → Hash des Requests (zur Nachvollziehbarkeit)
-
-### ✅ Konflikt-Handling
-- gleicher Key + anderer Body → **409 Conflict**
-- parallele Requests mit demselben Key → atomar genau eine gespeicherte Order
-
----
-
-## Projektstruktur
-
-```text
-idempotency-demo/
-  app/
-    main.py        # FastAPI App + /orders Endpoint
-    store.py       # Memory-Store (default) + optional SQLite-Store
-  scripts/
-    demo.sh        # Demo: gleicher Request 3x mit gleichem Key
-  tests/
-    test_idempotency.py  # Tests für Replay, Conflict, Missing-Key und parallele Retries
-  requirements.txt
-  README.md
+    C->>A: POST /orders + Idempotency-Key
+    A->>A: Request-Hash berechnen
+    A->>S: Atomar speichern, falls Key fehlt
+    alt neuer Key
+        S-->>A: Response gespeichert
+        A-->>C: 201 · Replayed false
+    else gleicher Key und Body
+        S-->>A: gespeicherte Response
+        A-->>C: 201 · Replayed true
+    else gleicher Key, anderer Body
+        S-->>A: anderer Request-Hash
+        A-->>C: 409 Conflict
+    end
 ```
 
-## Projekt starten
-Voraussetzungen
+## API-Verhalten
 
-- Python 3.10+ (empfohlen)
-- pip
+| Situation | Status | Ergebnis |
+| --- | ---: | --- |
+| Erster Request mit neuem Key | `201` | Response wird gespeichert |
+| Gleicher Key und gleicher Body | `201` | Ursprüngliche Response wird wiederholt |
+| Gleicher Key und anderer Body | `409` | Key-Konflikt |
+| Fehlender `Idempotency-Key` | `400` | Request wird abgelehnt |
 
-## Setup
-python -m venv .venv
-# macOS/Linux:
-source .venv/bin/activate
-# Windows PowerShell:
-# .\.venv\Scripts\Activate.ps1
+Relevante Response-Header:
 
-pip install -r requirements.txt
+- `Idempotency-Replayed: false|true`
+- `Idempotency-Request-Hash: <sha256>`
+- `Idempotency-Key: <client-key>`
 
-## Server starten
-uvicorn app.main:app --reload
-
-Danach:
-
-API: http://127.0.0.1:8000
-
-# Proof / Demo: gleicher Request 3x → gleiche order_id
-Erwartetes Ergebnis
-
-- Request 1: Idempotency-Replayed: false
-- Request 2/3: Idempotency-Replayed: true
-- order_id bleibt identisch → keine Duplikate trotz Retry
-
-# Linux/macOS/WSL/Git Bash
-chmod +x scripts/demo.sh
-./scripts/demo.sh
-
-# Windows PowerShell (ohne .sh)
-
-Voraussetzung: Server läuft bereits.
-
-```powershell
-$key = [guid]::NewGuid().ToString()
-$body = @{
-  customer_id="cust_123"
-  currency="EUR"
-  amount_cents=1999
-  items=@(@{ sku="sku_abc"; qty=1; unit_price_cents=1999 })
-} | ConvertTo-Json -Compress
-
-1..3 | ForEach-Object {
-  "`n---- Request $_ ----"
-  $resp = Invoke-WebRequest -Method Post -Uri "http://127.0.0.1:8000/orders" `
-    -UseBasicParsing `
-    -Headers @{ "Idempotency-Key" = $key } `
-    -ContentType "application/json" `
-    -Body $body
-
-  "Status: $($resp.StatusCode)"
-  "Idempotency-Replayed: $($resp.Headers['Idempotency-Replayed'])"
-  "OrderId: $((($resp.Content | ConvertFrom-Json).order_id))"
-}
-```
-
-# Edge Case (wichtig): gleicher Key + anderer Body ⇒ 409 Conflict
-
-```powershell
-$key = [guid]::NewGuid().ToString()
-
-$body1 = @{ customer_id="cust_123"; currency="EUR"; amount_cents=100 } | ConvertTo-Json -Compress
-$body2 = @{ customer_id="cust_123"; currency="EUR"; amount_cents=200 } | ConvertTo-Json -Compress
-
-Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:8000/orders" `
-  -Headers @{ "Idempotency-Key" = $key } -ContentType "application/json" -Body $body1 | Out-Null
-
-try {
-  Invoke-WebRequest -UseBasicParsing -Method Post -Uri "http://127.0.0.1:8000/orders" `
-    -Headers @{ "Idempotency-Key" = $key } -ContentType "application/json" -Body $body2
-} catch {
-  "Expected: HTTP $($_.Exception.Response.StatusCode.value__) (Conflict)"
-}
-```
-# Tests
-```powershell
-pytest -q
-```
-
-# Storage-Optionen
-Default: In-Memory
-
-Schnell & simpel für Demos.
-
-Achtung:
-
-Store ist nach Neustart weg
-
-nicht shared zwischen mehreren Prozessen/Instanzen
-
-Optional: Persistenter Store (SQLite)
-
-Für Persistenz über Neustarts:
-
-# macOS/Linux
-```powershell
-export IDEMPOTENCY_STORE=sqlite
-export IDEMPOTENCY_DB=./idempotency.sqlite3
-uvicorn app.main:app --reload
-```
-
-# Windows PowerShell
-```powershell
-$env:IDEMPOTENCY_STORE="sqlite"
-$env:IDEMPOTENCY_DB=".\\idempotency.sqlite3"
-uvicorn app.main:app --reload
-```
-
-# Wie die Implementierung funktioniert (konkret)
-
-1. Request kommt rein mit Idempotency-Key.
-2. Server berechnet einen stabilen Request-Hash (sortiertes JSON).
-3. Atomarer Insert-if-absent im Store:
-
-    - Key nicht vorhanden → Response genau einmal speichern
-    - Key vorhanden + gleicher Hash → gespeicherte Response zurückgeben (Replay)
-    - Key vorhanden + anderer Hash → 409 Conflict
-    - parallele Requests werden durch Locking beziehungsweise den SQLite-Primärschlüssel serialisiert
-
-# Production Notes / Grenzen
-
-Das hier ist eine Demo. In echten Systemen sind zusätzlich wichtig:
-    - Shared Store (DB/Redis) bei mehreren Instanzen
-    - TTL/Expiry für Keys (z. B. 24h)
-    - verteilte Atomicity über mehrere Instanzen, z. B. mit Redis `SET NX` oder einer Datenbank-Transaktion
-    - Side-Effects ebenfalls idempotent machen (Emails, Events, …)
-
-## Docker
-
-Image bauen und API starten:
+## Schnellstart mit Docker
 
 ```bash
 docker build -t idempotency-demo .
 docker run --rm -p 8000:8000 idempotency-demo
 ```
 
-Danach sind die API unter <http://127.0.0.1:8000> und die interaktive Dokumentation unter <http://127.0.0.1:8000/docs> erreichbar. Das Image läuft als nicht privilegierter Benutzer und prüft den Endpunkt `/health` über einen Container-Healthcheck.
+Danach:
 
+- API: <http://127.0.0.1:8000>
+- Swagger UI: <http://127.0.0.1:8000/docs>
+- Healthcheck: <http://127.0.0.1:8000/health>
+
+Das Image basiert auf Python 3.12 Slim, läuft als nicht privilegierter Benutzer und enthält einen Container-Healthcheck.
+
+## Lokale Entwicklung
+
+Voraussetzung: Python 3.10 oder neuer.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+Unter Windows PowerShell wird die Umgebung mit `.\.venv\Scripts\Activate.ps1` aktiviert.
+
+## Beispiel
+
+```bash
+KEY=$(python -c "import uuid; print(uuid.uuid4())")
+
+curl -i -X POST http://127.0.0.1:8000/orders \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: $KEY" \
+  -d '{
+    "customer_id": "cust_123",
+    "currency": "EUR",
+    "amount_cents": 1999,
+    "items": [
+      {"sku": "sku_abc", "qty": 1, "unit_price_cents": 1999}
+    ]
+  }'
+```
+
+Denselben Befehl mit unverändertem `KEY` erneut ausführen. Die `order_id` bleibt identisch und `Idempotency-Replayed` wechselt von `false` zu `true`.
+
+Alternativ führt `./scripts/demo.sh` drei identische Requests automatisch aus.
+
+## Tests und CI
+
+```bash
+python -m pytest -q
+```
+
+Die Tests prüfen:
+
+- Replay mit identischer `order_id`
+- Konflikt bei verändertem Request-Body
+- Ablehnung eines fehlenden Keys
+- 16 parallele Requests mit exakt einer neuen Response
+
+GitHub Actions führt die Tests mit Python 3.10 und 3.12 aus und baut zusätzlich das Docker-Image.
+
+## Speicheroptionen
+
+### In-Memory
+
+Standard für die schnelle lokale Demo:
+
+```bash
+uvicorn app.main:app --reload
+```
+
+Die Daten gehen beim Neustart verloren und werden nicht zwischen Prozessen geteilt.
+
+### SQLite
+
+Persistente lokale Variante:
+
+```bash
+export IDEMPOTENCY_STORE=sqlite
+export IDEMPOTENCY_DB=./idempotency.sqlite3
+uvicorn app.main:app --reload
+```
+
+Beide Stores verwenden atomare Insert-if-absent-Semantik. Der Memory-Store schützt den kritischen Abschnitt mit einem Lock; SQLite nutzt den Primärschlüssel und `INSERT OR IGNORE`.
+
+## Projektstruktur
+
+```text
+idempotency-demo/
+├── app/
+│   ├── main.py
+│   └── store.py
+├── scripts/
+│   └── demo.sh
+├── tests/
+│   └── test_idempotency.py
+├── .github/workflows/ci.yml
+├── Dockerfile
+└── requirements.txt
+```
+
+## Produktionsgrenzen
+
+Dieses Repository ist bewusst eine fokussierte Demo. Für ein verteiltes Produktivsystem wären zusätzlich erforderlich:
+
+- gemeinsam genutzter Store, beispielsweise PostgreSQL oder Redis
+- verteilte Atomicity über Transaktionen oder Redis `SET NX`
+- TTL und Bereinigung alter Idempotency-Keys
+- Idempotenz für externe Side Effects wie E-Mails und Events
+- Authentifizierung, Autorisierung, Observability und Rate Limits
