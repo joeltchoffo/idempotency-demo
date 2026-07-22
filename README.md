@@ -63,6 +63,7 @@ Darum wird Idempotency bei `POST` häufig über einen **Idempotency-Key** umgese
 
 ### ✅ Konflikt-Handling
 - gleicher Key + anderer Body → **409 Conflict**
+- parallele Requests mit demselben Key → atomar genau eine gespeicherte Order
 
 ---
 
@@ -76,7 +77,7 @@ idempotency-demo/
   scripts/
     demo.sh        # Demo: gleicher Request 3x mit gleichem Key
   tests/
-    test_idempotency.py  # Tests für Replay/Conflict/Missing-Key
+    test_idempotency.py  # Tests für Replay, Conflict, Missing-Key und parallele Retries
   requirements.txt
   README.md
 ```
@@ -197,18 +198,19 @@ uvicorn app.main:app --reload
 
 1. Request kommt rein mit Idempotency-Key.
 2. Server berechnet einen stabilen Request-Hash (sortiertes JSON).
-3. Lookup im Store:
+3. Atomarer Insert-if-absent im Store:
 
-    - Key nicht vorhanden → Order erzeugen, Response speichern
+    - Key nicht vorhanden → Response genau einmal speichern
     - Key vorhanden + gleicher Hash → gespeicherte Response zurückgeben (Replay)
     - Key vorhanden + anderer Hash → 409 Conflict
+    - parallele Requests werden durch Locking beziehungsweise den SQLite-Primärschlüssel serialisiert
 
 # Production Notes / Grenzen
 
 Das hier ist eine Demo. In echten Systemen sind zusätzlich wichtig:
     - Shared Store (DB/Redis) bei mehreren Instanzen
     - TTL/Expiry für Keys (z. B. 24h)
-    - Atomicity (z. B. SETNX in Redis) um Race Conditions bei parallelen Requests zu verhindern
+    - verteilte Atomicity über mehrere Instanzen, z. B. mit Redis `SET NX` oder einer Datenbank-Transaktion
     - Side-Effects ebenfalls idempotent machen (Emails, Events, …)
 
 ## Docker
