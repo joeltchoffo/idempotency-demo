@@ -210,3 +210,15 @@ Das hier ist eine Demo. In echten Systemen sind zusätzlich wichtig:
     - TTL/Expiry für Keys (z. B. 24h)
     - Atomicity (z. B. SETNX in Redis) um Race Conditions bei parallelen Requests zu verhindern
     - Side-Effects ebenfalls idempotent machen (Emails, Events, …)
+
+## Docker
+
+Image bauen und API starten:
+
+```bash
+docker build -t idempotency-demo .
+docker run --rm -p 8000:8000 idempotency-demo
+```
+
+Danach sind die API unter <http://127.0.0.1:8000> und die interaktive Dokumentation unter <http://127.0.0.1:8000/docs> erreichbar. Das Image läuft als nicht privilegierter Benutzer und prüft den Endpunkt `/health` über einen Container-Healthcheck.
+
