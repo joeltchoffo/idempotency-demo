@@ -57,52 +57,35 @@ def create_order(
         )
 
     request_hash = _hash_request(order)
-    existing = store.get(idempotency_key)
-
-    if existing:
-        if existing.request_hash != request_hash:
-            raise HTTPException(
-                status_code=409,
-                detail="Idempotency-Key already used with a different request body.",
-            )
-        # Replay the exact same response
-        return JSONResponse(
-            status_code=existing.status_code,
-            content=existing.response_json,
-            headers={
-                "Idempotency-Key": idempotency_key,
-                "Idempotency-Replayed": "true",
-                "Idempotency-Request-Hash": existing.request_hash,
-            },
-        )
-
-    # First time we see this key: create the order once
-    order_id = f"ord_{uuid4().hex[:12]}"
-    created_at = datetime.now(timezone.utc).isoformat()
-
     response_body = {
-        "order_id": order_id,
+        "order_id": f"ord_{uuid4().hex[:12]}",
         "status": "created",
-        "created_at": created_at,
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "customer_id": order.customer_id,
         "currency": order.currency,
         "amount_cents": order.amount_cents,
         "request_hash": request_hash,
     }
 
-    store.put(
+    stored, created = store.put_if_absent(
         key=idempotency_key,
         request_hash=request_hash,
         status_code=201,
         response_json=response_body,
     )
 
+    if stored.request_hash != request_hash:
+        raise HTTPException(
+            status_code=409,
+            detail="Idempotency-Key already used with a different request body.",
+        )
+
     return JSONResponse(
-        status_code=201,
-        content=response_body,
+        status_code=stored.status_code,
+        content=stored.response_json,
         headers={
             "Idempotency-Key": idempotency_key,
-            "Idempotency-Replayed": "false",
-            "Idempotency-Request-Hash": request_hash,
+            "Idempotency-Replayed": "false" if created else "true",
+            "Idempotency-Request-Hash": stored.request_hash,
         },
     )
